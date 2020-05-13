@@ -1,0 +1,285 @@
+---
+output:
+  rmdformats::readthedown:
+author: "Daehyun Kim"
+date: "September 20, 2019"
+title: "Stats 405 Final Project"
+---
+
+<style>
+#main .nav-pills > li.active > a,
+#main .nav-pills > li.active > a:hover,
+#main .nav-pills > li.active > a:focus {
+   background-color: #3c8dbc;
+}
+
+#main .nav-pills > li > a:hover {
+  background-color: #3c8dbc;
+}
+
+h1,h2,h3,h4,h5,h6,legend{
+    color: #3c8dbc;
+}
+
+#nav-top span.glyphicon {
+  color: #3c8dbc;
+}
+
+h1.title {
+    font-size: 0%;
+    margin-top: 0px;
+}
+
+#table-of-contents header{
+    color:#3c8dbc;
+}
+
+#table-of-contents h2{
+    background-color:#3c8dbc;
+}
+
+#main a {
+    background-image: linear-gradient(180deg,#d64a70,#d64a70);
+    color:#c7254e;
+}
+
+a:hover{
+    color:#3d1308
+}
+
+a:visited{
+    color:#3d1308
+}
+
+body{
+    background:#fff;
+    color:#404040;
+    font-family:"Lato","proxima-nova","Helvetica Neue",Arial,sans-serif;
+    font-weight:normal;
+    margin:0;
+    min-height:100%;
+    overflow-x:hidden;
+}
+
+#content{
+    background:#fff;
+    height:100%;
+    margin-left:300px;
+    /* margin:auto; */
+    max-width:1000px;
+    min-height:100%;
+}
+
+</style>
+
+
+```{r setOptions, echo=FALSE, message=FALSE}
+library(rmdformats)
+library(plotly)
+library(knitr)
+op <- options(gvis.plot.tag = 'chart')
+
+```
+
+***
+**Introduction**
+===========================================
+***
+
+My objective for this project is to create a MySQL database with web-scraped Historical Movies Box Office Data. For the scope of this project, the database will be on my local system, but this can be created on the cloud server as well utilizing the same methods.
+
+After setting up the database, I will clean the tables and execute multiple joins.
+Using the extracted data, I will also perform some basic data analysis.
+
+This project will consist of several components taught in this class such as web-scraping HTML tables, storing data in MySQL database, and cleaning and analyzing data using R packages/functions.
+
+***
+**Gathering Data**
+===========================================
+***
+
+First, we need to pull Box Office data from publicly available online sources. There is a website called **Box Office Mojo** which is the leading online box-office reporting service, owned by IMDb. Website link is below:
+[Box Office Mojo](https://www.boxofficemojo.com)
+
+The website provides all-time Opening/Total-Gross Box Office and Theater Data for all the movies both domestically and internationally. We will focus on domestic data (U.S. + Canada) for this project. We will use the following R codes to go into web page of each movie's data summary and pull corresponding data into R. All data will be cleaned to take care of missing data and the structures.
+
+```{r Mojo_Scrap, results='asis', tidy=FALSE}
+
+#############################################
+## Get the master movie list with Parallel ##
+#############################################
+
+# Help Function to count the length of a string
+string.counter = function(strings, pattern){  
+  counts = NULL
+  for (i in 1:length(strings)) {
+    counts[i] = length(attr(gregexpr(pattern,strings[i])[[1]], "match.length")[attr(gregexpr(pattern,strings[i])[[1]], "match.length") > 0])
+  }
+  return(counts)
+}
+
+
+library(doParallel)
+library(foreach)
+
+cl = makePSOCKcluster(2)
+registerDoParallel(cl)
+getDoParWorkers()
+
+master.table = foreach(Letter = c("NUM",LETTERS), .packages = c('foreach','rvest'), .combine = rbind) %dopar% {
+  
+  original.url = paste0("http://www.boxofficemojo.com/movies/alphabetical.htm?letter=",Letter,"&p=.htm")
+  
+  numOfPages_String = (read_html(original.url) %>% html_nodes(".alpha-nav-holder") %>% html_text())[1]
+  
+  if (Letter != "NUM") {
+    numOfPages = string.counter(strings = numOfPages_String, pattern = "\\|") + 1
+  } else {
+    numOfPages = 1
+  }
+  
+  foreach(Page = 1:numOfPages, .packages = c('foreach','rvest'), .combine = rbind) %dopar% {
+    url = paste0("http://www.boxofficemojo.com/movies/alphabetical.htm?letter=",Letter,"&page=",Page,"&p=.htm")
+    
+    url.df = data.frame(
+      title = read_html(url) %>% html_nodes("table") %>% .[[2]] %>% 
+        html_nodes("a") %>% html_text(),
+      link = read_html(url) %>% html_nodes("table") %>% .[[2]] %>% 
+        html_nodes("a") %>% html_attr("href"),
+      stringsAsFactors = F)
+    
+    url.df = url.df[grep("\\/movies\\/\\?id",url.df$link),]
+    
+    mojo.df = read_html(url) %>% html_nodes("table") %>% .[[2]] %>% html_table(fill = T) %>% data.frame()
+    mojo.df = mojo.df[,c(1:7)]
+    colnames(mojo.df) = mojo.df[4,]
+    mojo.df = mojo.df[-c(1:4,nrow(mojo.df)),]
+    names(mojo.df)[1] = "title"
+    
+    mojo.df = cbind(mojo.df,url.df)
+    
+  }
+}
+
+stopCluster(cl)
+
+master.table = master.table[,-8] #get rid of the extra title column
+master.table$Open = as.Date(master.table$Open, format = "%m/%d/%Y")
+# Handle N/A in the data
+master.sub.table = subset(master.table, !is.na(master.table$Open))
+names(master.sub.table)[3:7] = c("Box_Office_Total_Gross","Theaters_Total_Gross","Box_Office_Opening","Theaters_Opening","Open_Date")
+master.sub.table = subset(master.sub.table, !(master.sub.table$Box_Office_Total_Gross == "n/a" | master.sub.table$Box_Office_Opening == "n/a" | master.sub.table$Theaters_Total_Gross == "n/a" |
+                                                master.sub.table$Theaters_Opening == "n/a" ))
+master.sub.table$link = paste0("http://www.boxofficemojo.com",master.sub.table$link)
+
+# Convert Strings to Numerics
+master.sub.table[,c("Box_Office_Total_Gross","Theaters_Total_Gross","Box_Office_Opening","Theaters_Opening")] = sapply(master.sub.table[,c("Box_Office_Total_Gross","Theaters_Total_Gross","Box_Office_Opening","Theaters_Opening")], function(x) as.numeric(gsub("\\$|\\,","",x)))
+
+
+####################################################
+## Scrap more detailed information from each link ##
+####################################################
+
+cl = makePSOCKcluster(2)
+registerDoParallel(cl)
+getDoParWorkers()
+
+results = foreach(i = 1:length(master.sub.table$link), .packages = c('foreach','rvest'), .combine = rbind) %dopar% {
+  res = tryCatch({
+    df = read_html(master.sub.table$link[i]) %>% html_nodes("table") %>% .[[4]] %>% html_table(fill = TRUE)
+    df = df[-c(1:2),c(1:2)]
+    df$title = master.sub.table$title[i]
+    df
+  },
+  error = function(e) {
+    NULL
+  })
+}
+
+stopCluster(cl)
+
+results.final = subset(results,grepl("Production\\sBudget",results$X2))
+names(results.final)[1:3] = c("Rating","Production.Budget","title")
+results.final$Rating = gsub("MPAA\\sRating\\:\\s","",results.final$Rating)
+results.final$Production.Budget = gsub("Production\\sBudget\\:\\s","",results.final$Production.Budget)
+
+mojo.data = merge(master.sub.table,results.final,by = c("title"),all.x = T)
+
+mojo.data$Production.Budget = gsub("\\s|\\$|\\,","",mojo.data$Production.Budget)
+mojo.data$Production.Budget = ifelse(grepl("million",mojo.data$Production.Budget),
+                                    as.numeric(gsub("million","",mojo.data$Production.Budget))*1000000,
+                                    as.numeric(mojo.data$Production.Budget))
+
+```
+
+
+***
+**Storing Data**
+===========================================
+***
+
+With the collected Box Office data, now we will set up a MySQL database so we can easily access the data from a SQL database without the time-consuming data pulling and cleaning each time.
+
+We can run SQL commands in R. If you do not already have MySQL on your computer, you can simply download the community version from MySQL website:
+
+[MySQL Community Edition](https://www.mysql.com/products/community/)
+
+From the installation, there is a software called **MySQL Workbench** which has visual modeling and lets you write and execute SQL scripts as well as see the data tables on the server.
+
+Once you have created an account, you can access your MySQL server through R using the RMySQL package. The code below creates tables and sets keys for Box Office data.
+
+``` {r Store_MySQL, results='asis', tidy=FALSE, comment=NA}
+library(RMySQL)
+
+mojo <- dbConnect(MySQL(), user='root', password=password, host='localhost')
+
+dbSendQuery(mojo, "CREATE DATABASE mojo")
+dbSendQuery(mojo, "USE mojo")
+
+dbWriteTable(baseball, value = mojo.data, name = "mojo", append=FALSE, overwrite=TRUE)
+
+pbp <- as.data.frame(pbp)
+# For some reason, the dbWriteTable function did not handle the logical (boolean) variables correctly,
+# there is probably a better fix, but sometimes the easy fix is good enough
+pbp[, c("leadoff", "bevent", "newgame", "endgame"):=list(as.integer(leadoff), as.integer(bevent), 
+                                                         as.integer(newgame), as.integer(endgame))]
+dbWriteTable(baseball, value = pbp, name = "events", append=FALSE, overwrite=TRUE)
+
+events2017 <- as.data.frame(events2017)
+dbWriteTable(baseball, value = events2017, name = "events2017", append=FALSE, overwrite=TRUE)
+
+# dbWriteTable chooses domain types for variables, the default is fine, but for the primary keys
+# I chose to change to a VARCHAR(12) as the IDs are a standard format and this is easier to reference in commands 
+dbSendQuery(baseball, "ALTER TABLE games
+            MODIFY gameid VARCHAR(12)")
+
+dbSendQuery(baseball, "ALTER TABLE events
+            MODIFY gameid VARCHAR(12)")
+
+# Primary keys are the unique identifiers of each row in a table
+dbSendQuery(baseball, "ALTER TABLE games 
+            CHANGE COLUMN gameid gameid VARCHAR(12) NOT NULL,
+            ADD PRIMARY KEY (gameid)")
+
+dbSendQuery(baseball, "ALTER TABLE events 
+            CHANGE COLUMN gameid gameid VARCHAR(12) NOT NULL,
+            CHANGE COLUMN eventid eventid BIGINT(20) NOT NULL,
+            ADD PRIMARY KEY (gameid, eventid)")
+
+dbSendQuery(baseball, "ALTER TABLE events2017 
+            CHANGE COLUMN gameid gameid DOUBLE NOT NULL,
+            CHANGE COLUMN eventid eventid DOUBLE NOT NULL,
+            ADD PRIMARY KEY (gameid, eventid)")
+
+# Setting a foreign key on the events table is again probably not necessary,
+# but it is a good practice in general and worthwhile to show. 
+# Here we are saying that every sequence of events must have a game associated with it. 
+# You cannot delete a game or update a gameid, and before I add new sequences of events, 
+# I must first add its associated game log 
+dbSendQuery(baseball, "ALTER TABLE events 
+            ADD CONSTRAINT FK_gameid
+            FOREIGN KEY (gameid)
+            REFERENCES games(gameid)
+            ON DELETE RESTRICT
+            ON UPDATE RESTRICT")
+```
